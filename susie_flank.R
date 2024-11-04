@@ -9,6 +9,7 @@ suppressPackageStartupMessages(library(susieR))
 suppressPackageStartupMessages(library(Rfast))
 suppressPackageStartupMessages(library(GenomicRanges))
 suppressPackageStartupMessages(library(GenomeInfoDb))
+suppressPackageStartupMessages(library(parallel))
 #====================================================================
 
 option_list <- list(
@@ -32,6 +33,8 @@ option_list <- list(
               help="choose L2 norm function [default %default]"),
   make_option(c("-q", "--qtl"), type="character", default= NULL,
               help="leader snps results file from QTLtools conditional pass"),
+  make_option("--threads", type="numeric", default= 1,
+              help="number of CPU threads [default %default]"),
   make_option(c("-o", "--output"), type="character", default= "./", 
               help="To specify output path [default %default]"))
 
@@ -80,62 +83,51 @@ message("output: ", output)
 options(stringsAsFactors = FALSE)
 
 print(paste0(arguments$name, " start"))
-#====================================================================
+### 定义函数====================================================================
 # get numeric genotype
 seqinfo <- Seqinfo(genome = "hg38")
-get_geno <- function(chr, pos, flank = 500000){
+get_geno <- function(chr, pos, flank = 500000) {
   pos <- as.numeric(pos)
-  # 构建 GRanges 对象表示 SNP 位置
-  #snp <- GRanges(chr, IRanges(pos, pos))
   snp <- GRanges(chr, IRanges(pos, pos), seqinfo = seqinfo)
-  # 构建flanking区间
-  #region <- trim(flank(snp, flank, both = TRUE), seqinfo(Hsapiens)[seqlevels(snp)])
   region <- trim(flank(snp, flank, both = TRUE))
-
-  # 使用该区间读取VCF  
+  
+  # 使用 ScanVcfParam 只读取需要的列
   vcf <- readVcf(vcffile, "hg38", param = ScanVcfParam(which = region))
-
+  
   # 提取SNP信息和基因型数据
   snp_info <- rowRanges(vcf)
-  geno <- as.data.frame(geno(vcf)$GT)
-
-  # 将基因型数据转换为数值编码
-  geno_num <- apply(geno, 2, function(x) {
+  geno <- setDT(as.data.frame(geno(vcf)$GT))
+  
+  # 保存行名（SNP ID）
+  snp_ids <- row.names(geno)
+  
+  # 使用 data.table 的方式处理基因型
+  geno_num <- geno[, lapply(.SD, function(x) {
     x <- as.character(x)
-    
-    # 找出最常见的非缺失基因型
     missing_vals <- c(".", ".|.", "./.")
     valid_genos <- x[!x %in% missing_vals]
-    most_common <- names(sort(table(valid_genos), decreasing=TRUE))[1]
-    
-    # 处理缺失值
+    most_common <- names(which.max(table(valid_genos)))
     x[x %in% missing_vals] <- most_common
-    
-    # 替换分隔符，统一用"/"
     x <- gsub("\\|", "/", x)
     
-    # 转换基因型为数值
-    x_num <- sapply(x, function(gt) {
+    sapply(x, function(gt) {
       alleles <- as.numeric(strsplit(gt, "/")[[1]])
       if (all(alleles %in% c(0,1))) {
-        # 标准的 0/1 编码
         return(sum(alleles))
       } else {
-        # 对于多等位基因，计算非参考等位基因的数量
         return(sum(alleles != 0))
       }
     })
-    
-    return(x_num)
-  })
-
-  # 将基因型数据转换为数值编码
-  #geno_num <- apply(geno_num, c(1,2), as.numeric)
-
-  row.names(geno_num) <- row.names(geno)
-  geno_num <- t(geno_num)
-
-  return(geno_num)
+  })]
+  
+  # 转换为矩阵并设置行名
+  result <- as.matrix(geno_num)
+  row.names(result) <- snp_ids
+  
+  # 清理内存
+  rm(geno, geno_num); gc()
+  
+  return(t(result))
 }
 
 # inverse normal transform
@@ -157,12 +149,11 @@ qtltools_normal_transform <- function(x) {
   
   return(x)
 }
-#====================================================================
+### 读取文件====================================================================
 # 读取表型数据文件
 pheno <- fread(bedfile)
-
-colnames(pheno)[1] <- "chr"
-pheno <- subset(pheno, chr != "chrY")
+setnames(pheno, 1, "chr")
+pheno <- pheno[chr != "chrY"]
 
 # 读取cov文件
 if(length(covfile) == 1){
@@ -176,34 +167,35 @@ qtl <- fread(qtlfile)
 
 ids <- unique(paste0(qtl$V8, "|",qtl$V1))
 
-###
+
 results_list <- list()
-###
-for(id in ids){
-  phenotype <- str_split_fixed(id, "[|]", n=2)[,2]
-  snp <- str_split_fixed(id, "[|]", n=2)[,1]
 
-  print(paste0("Processing ", id))
-
+### 封装主函数=================================================================
+process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, pheno, cov, arguments) {
+    phenotype <- str_split_fixed(id, "[|]", n=2)[,2]
+    snp <- str_split_fixed(id, "[|]", n=2)[,1]
+    
+    print(paste0("Processing ", id))
+    
   # 提取信息
   chr <- str_split_fixed(snp, "[:]", n=3)[,1]
   pos <- str_split_fixed(snp, "[:]", n=3)[,2]
 
   # 提取当前flank的基因型数据
   geno_numeric <- get_geno(chr, pos, flank)
-
-  if(ncol(geno_numeric) == 1){
-    res1 <- data.frame(variant_id =  colnames(geno_numeric), pip = NA, cs_id = "one", stringsAsFactors = FALSE)
-    res2 <- data.frame(min_abs_corr = NA,
-                      mean_abs_corr = NA,
-                      median_abs_corr = NA)
-    res_df <- cbind(res1, res2)
-    res_df$id <- phenotype
-    results_list[[phenotype]] <- res_df
-
-    print(paste0('Skip ', phenotype))
-    next
-  }
+  if(ncol(geno_numeric) == 0){return(NULL)}
+  if(ncol(geno_numeric) == 1) {
+        return(data.frame(
+            variant_id = colnames(geno_numeric),
+            pip = NA,
+            cs_id = "one",
+            min_abs_corr = NA,
+            mean_abs_corr = NA,
+            median_abs_corr = NA,
+            id = phenotype,
+            stringsAsFactors = FALSE
+        ))
+    }
   
   phe_geno_mat <- as.matrix(geno_numeric)
   mode(phe_geno_mat) <- "double"
@@ -223,9 +215,8 @@ for(id in ids){
 
     model <- lm(phe_y_vec ~ t(cov_matrix))
       
-    adjusted_y <- residuals(model)
+    phe_y_vec <- residuals(model)
 
-    phe_y_vec <- adjusted_y
   }
 
   # 对应样本数量
@@ -235,7 +226,7 @@ for(id in ids){
     
   phe_geno_mat <- as.matrix(phe_geno_mat)
   mode(phe_geno_mat) <- "double"
-    
+
   phe_y_vec <- phe_y_vec[row.names(phe_geno_mat)]
 
   # qnorm变换
@@ -249,7 +240,6 @@ for(id in ids){
   }
 
   # susie ===========================================================
-  
   if(arguments$rss){
     # 构建 LD matrix
     dat <- compute_suff_stat(phe_geno_mat, phe_y_vec, standardize = FALSE)
@@ -274,16 +264,52 @@ for(id in ids){
 
     # 运行 susie_rss 分析
     print(paste0("Running susie_rss"))
-    susie_res <- susie_rss(bhat = qtl$slope, shat = qtl$slope_se, R = R, n=n, var_y = var(phe_y_vec),
-      L = 10, coverage = confidence)
+        susie_res <- susie_rss(bhat = qtl$slope, 
+                              shat = qtl$slope_se, 
+                              R = R, 
+                              n = n, 
+                              var_y = var(phe_y_vec),
+                              L = 10, 
+                              coverage = confidence)
   }else{
     # 运行 susie 分析
     print(paste0("Running susie"))
-    susie_res <- susie(X = phe_geno_mat, y = phe_y_vec, L = 10, coverage = confidence)
+    res_df <- NULL  # 初始化res_df在外部作用域
+    susie_res <- tryCatch({
+        res <- susie(X = phe_geno_mat,
+                    y = phe_y_vec,
+                    L = 10,
+                    coverage = confidence)
+        if(is.null(res$alpha) || nrow(res$alpha) == 0) {
+            # 如果没有找到可信集合，返回一个空的结果
+            return(NULL)
+        }
+        res
+    }, error = function(e) {
+        message("Error in susie for phenotype ", phenotype, ": ", e$message)
+        return(NULL)
+    })
+
   }
+  if(is.null(susie_res)) {
+    # 如果susie分析失败，创建一个空的结果
+    return(data.frame(
+            variant_id = colnames(phe_geno_mat),
+            pip = NA,
+            cs_id = "",
+            min_abs_corr = NA,
+            mean_abs_corr = NA,
+            median_abs_corr = NA,
+            id = phenotype,
+            stringsAsFactors = FALSE
+        ))
+ }
 
   # 检查susie结果=====================================================
-  if (susie_res$converged) {
+    if(!susie_res$converged) {
+        message("SuSiE did not converge for id ", phenotype)
+        return(NULL)
+    }
     # 提取susie结果
     pip <- susie_res$pip
     credible_sets <- susie_res$sets$cs
@@ -325,17 +351,64 @@ for(id in ids){
     
     # 添加表型信息
     res_df$id <- phenotype
+    return(res_df)
+}
+### 并行处理========================================================================
+message("Number of threads: ", arguments$threads)
+
+if(arguments$threads > 1) {
+    # 创建集群
+    cl <- makeCluster(arguments$threads)
     
-    # 添加到结果列表
-    results_list[[phenotype]] <- res_df
-  } else {
-    message("SuSiE did not converge for id ", phenotype)
-  }
-  print("Done")
+    # 导出需要的包和函数到集群
+    clusterEvalQ(cl, {
+        library(stringr)
+        library(VariantAnnotation)
+        library(dplyr)
+        library(data.table)
+        library(susieR)
+        library(Rfast)
+        library(GenomicRanges)
+        library(GenomeInfoDb)
+    })
+    
+    # 导出需要的变量到集群
+    clusterExport(cl, c("vcffile", "bedfile", "flank", "confidence", 
+                       "covfile", "pheno", "cov", "arguments", 
+                       "get_geno", "qtltools_normal_transform", 
+                       "process_phenotype", "seqinfo"))
+    
+    # 并行执行
+    results_list <- parLapply(cl, ids, function(id) {
+        tryCatch({
+            process_phenotype(id, vcffile, bedfile, flank, confidence, 
+                            covfile, pheno, cov, arguments)
+        }, error = function(e) {
+            message("Error processing ", id, ": ", e$message)
+            return(NULL)
+        })
+    })
+    
+    # 关闭集群
+    stopCluster(cl)
+    
+    # 移除NULL结果
+    results_list <- results_list[!sapply(results_list, is.null)]
+    
+} else {
+    # 单线程处理
+    results_list <- list()
+    for(id in ids) {
+        results_list[[length(results_list) + 1]] <- process_phenotype(
+            id, vcffile, bedfile, flank, confidence, covfile, pheno, cov, arguments
+        )
+    }
 }
 
-# 合并所有结果
-results_df <- rbindlist(results_list, fill=TRUE)
+# 合并结果并继续后续处理
+results_df <- rbindlist(results_list, fill = TRUE, use.names = TRUE)
+rm(results_list);gc()
+
 tt <- subset(results_df, cs_id > 0)
 non <- subset(results_df, cs_id == "")
 # 写出结果
