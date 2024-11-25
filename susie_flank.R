@@ -99,7 +99,8 @@ get_geno <- function(chr, pos, flank = 500000) {
   geno <- setDT(as.data.frame(geno(vcf)$GT))
   
   # 保存行名（SNP ID）
-  snp_ids <- row.names(geno)
+  #snp_ids <- row.names(geno)
+  snp_ids <- names(rowRanges(vcf))
   
   # 使用 data.table 的方式处理基因型
   geno_num <- geno[, lapply(.SD, function(x) {
@@ -123,6 +124,7 @@ get_geno <- function(chr, pos, flank = 500000) {
   # 转换为矩阵并设置行名
   result <- as.matrix(geno_num)
   row.names(result) <- snp_ids
+
   
   # 清理内存
   rm(geno, geno_num); gc()
