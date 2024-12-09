@@ -1,3 +1,5 @@
+
+
 #! /usr/bin/Rscript
 #====================================================================
 suppressPackageStartupMessages(library(optparse))
@@ -35,7 +37,7 @@ option_list <- list(
               help="leader snps results file from QTLtools conditional pass"),
   make_option("--threads", type="numeric", default= 1,
               help="number of CPU threads [default %default]"),
-  make_option(c("-o", "--output"), type="character", default= "./", 
+  make_option(c("-o", "--output"), type="character", default= "./",
               help="To specify output path [default %default]"))
 
 parser <- OptionParser(usage = "%prog [options]", option_list=option_list,
@@ -90,18 +92,18 @@ get_geno <- function(chr, pos, flank = 500000) {
   pos <- as.numeric(pos)
   snp <- GRanges(chr, IRanges(pos, pos), seqinfo = seqinfo)
   region <- trim(flank(snp, flank, both = TRUE))
-  
+
   # 使用 ScanVcfParam 只读取需要的列
   vcf <- readVcf(vcffile, "hg38", param = ScanVcfParam(which = region))
-  
+
   # 提取SNP信息和基因型数据
   snp_info <- rowRanges(vcf)
   geno <- setDT(as.data.frame(geno(vcf)$GT))
-  
+
   # 保存行名（SNP ID）
   #snp_ids <- row.names(geno)
   snp_ids <- names(rowRanges(vcf))
-  
+
   # 使用 data.table 的方式处理基因型
   geno_num <- geno[, lapply(.SD, function(x) {
     x <- as.character(x)
@@ -110,7 +112,7 @@ get_geno <- function(chr, pos, flank = 500000) {
     most_common <- names(which.max(table(valid_genos)))
     x[x %in% missing_vals] <- most_common
     x <- gsub("\\|", "/", x)
-    
+
     sapply(x, function(gt) {
       alleles <- as.numeric(strsplit(gt, "/")[[1]])
       if (all(alleles %in% c(0,1))) {
@@ -120,15 +122,15 @@ get_geno <- function(chr, pos, flank = 500000) {
       }
     })
   })]
-  
+
   # 转换为矩阵并设置行名
   result <- as.matrix(geno_num)
   row.names(result) <- snp_ids
 
-  
+
   # 清理内存
   rm(geno, geno_num); gc()
-  
+
   return(t(result))
 }
 
@@ -136,19 +138,19 @@ get_geno <- function(chr, pos, flank = 500000) {
 qtltools_normal_transform <- function(x) {
   # 移除NA值
   x_clean <- x[!is.na(x)]
-  
+
   # 计算秩，使用"first"方法处理tied values
   r <- rank(x_clean, ties.method = "first")
-  
+
   # 转换秩到[0,1]区间
   r_scaled <- r / (length(x_clean) + 1)
-  
+
   # 应用逆正态变换
   x_transformed <- qnorm(r_scaled)
-  
+
   # 将转换后的值放回原始向量
   x[!is.na(x)] <- x_transformed
-  
+
   return(x)
 }
 ### 读取文件====================================================================
@@ -176,9 +178,9 @@ results_list <- list()
 process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, pheno, cov, arguments) {
     phenotype <- str_split_fixed(id, "[|]", n=2)[,2]
     snp <- str_split_fixed(id, "[|]", n=2)[,1]
-    
+
     print(paste0("Processing ", id))
-    
+
   # 提取信息
   chr <- str_split_fixed(snp, "[:]", n=3)[,1]
   pos <- str_split_fixed(snp, "[:]", n=3)[,2]
@@ -198,7 +200,7 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
             stringsAsFactors = FALSE
         ))
     }
-  
+
   phe_geno_mat <- as.matrix(geno_numeric)
   mode(phe_geno_mat) <- "double"
 
@@ -216,16 +218,16 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
     cov_matrix <- apply(cov, c(1,2), as.numeric)
 
     model <- lm(phe_y_vec ~ t(cov_matrix))
-      
+
     phe_y_vec <- residuals(model)
 
   }
 
   # 对应样本数量
   phe_y_vec <- phe_y_vec[names(phe_y_vec) %in% row.names(phe_geno_mat)]
-    
+
   phe_geno_mat <- phe_geno_mat[row.names(phe_geno_mat) %in% names(phe_y_vec),]
-    
+
   phe_geno_mat <- as.matrix(phe_geno_mat)
   mode(phe_geno_mat) <- "double"
 
@@ -266,12 +268,12 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
 
     # 运行 susie_rss 分析
     print(paste0("Running susie_rss"))
-        susie_res <- susie_rss(bhat = qtl$slope, 
-                              shat = qtl$slope_se, 
-                              R = R, 
-                              n = n, 
+        susie_res <- susie_rss(bhat = qtl$slope,
+                              shat = qtl$slope_se,
+                              R = R,
+                              n = n,
                               var_y = var(phe_y_vec),
-                              L = 10, 
+                              L = 10,
                               coverage = confidence)
   }else{
     # 运行 susie 分析
@@ -315,7 +317,7 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
     # 提取susie结果
     pip <- susie_res$pip
     credible_sets <- susie_res$sets$cs
-    
+
     # 将结果与SNP注释信息整合
     res_df <- data.frame(variant_id = names(pip), pip = pip, stringsAsFactors = FALSE)
     # 如果有可信的SNP集,添加它们的置信度得分
@@ -329,7 +331,7 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
           ""
         }
       }, FUN.VALUE = character(1))
-      
+
       # 创建一个数据框来存储所有的purity信息
       purity_df <- data.frame(
         cs_id = rep(names(credible_sets), each = 3),
@@ -337,7 +339,7 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
         purity_value = c(susie_res$sets$purity$min.abs.corr, susie_res$sets$purity$mean.abs.corr, susie_res$sets$purity$median.abs.corr),
         stringsAsFactors = FALSE
       )
-      
+
       # 对每个SNP,添加所属credible set的purity信息
       purity_cols <- c("min_abs_corr", "mean_abs_corr", "median_abs_corr")
       for (col in purity_cols) {
@@ -350,7 +352,7 @@ process_phenotype <- function(id, vcffile, bedfile, flank, confidence, covfile, 
         }, FUN.VALUE = character(1))
       }
     }
-    
+
     # 添加表型信息
     res_df$id <- phenotype
     return(res_df)
@@ -361,7 +363,7 @@ message("Number of threads: ", arguments$threads)
 if(arguments$threads > 1) {
     # 创建集群
     cl <- makeCluster(arguments$threads)
-    
+
     # 导出需要的包和函数到集群
     clusterEvalQ(cl, {
         library(stringr)
@@ -373,30 +375,30 @@ if(arguments$threads > 1) {
         library(GenomicRanges)
         library(GenomeInfoDb)
     })
-    
+
     # 导出需要的变量到集群
-    clusterExport(cl, c("vcffile", "bedfile", "flank", "confidence", 
-                       "covfile", "pheno", "cov", "arguments", 
-                       "get_geno", "qtltools_normal_transform", 
+    clusterExport(cl, c("vcffile", "bedfile", "flank", "confidence",
+                       "covfile", "pheno", "cov", "arguments",
+                       "get_geno", "qtltools_normal_transform",
                        "process_phenotype", "seqinfo"))
-    
+
     # 并行执行
     results_list <- parLapply(cl, ids, function(id) {
         tryCatch({
-            process_phenotype(id, vcffile, bedfile, flank, confidence, 
+            process_phenotype(id, vcffile, bedfile, flank, confidence,
                             covfile, pheno, cov, arguments)
         }, error = function(e) {
             message("Error processing ", id, ": ", e$message)
             return(NULL)
         })
     })
-    
+
     # 关闭集群
     stopCluster(cl)
-    
+
     # 移除NULL结果
     results_list <- results_list[!sapply(results_list, is.null)]
-    
+
 } else {
     # 单线程处理
     results_list <- list()
